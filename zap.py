@@ -2,23 +2,34 @@ import argparse
 import json
 import os
 import sys
+import time
+
+import zap_scan
 
 import docker
-from docker.errors import ImageNotFound, DockerException
+from docker.errors import ImageNotFound, DockerException, NotFound
 
 
 class ZAP:
+    """
+    ZAP class make it possible to run ZAP proxy on specific target
+    """
+
     def __init__(self, target, output_filepath):
+        """
+        ZAP constructor
+        """
+        self.results = {}
+        self.target = target
+        self.output_filepath = output_filepath
+        self.zap_image_name = 'owasp/zap2docker-stable'
+        self.zap_container_name = 'zap'
 
         try:
             self.client = docker.from_env()
         except DockerException:
             print(f'[-] Cannot find api. maybe docker is not running.')
             sys.exit(-1)
-        self.results = {}
-        self.target = target
-        self.output_filepath = output_filepath
-        self.zap_image_name = 'owasp/zap2docker-stable'
 
         if os.path.exists(output_filepath):
             with open(output_filepath) as self.output_file:
@@ -36,47 +47,41 @@ class ZAP:
             print(f'[+] Successfully pulled.')
 
     def create_output(self):
+        """
+        Save scan results on file
+        """
         with open(self.output_filepath, 'w') as self.output_file:
             json.dump(self.results, self.output_file)
 
-    def get_processed_results(self, raw_results):
-        processed_results = []
-        for technology in raw_results['technologies']:
-            name = technology['name']
-            slug = technology['slug']
-            version = technology['version']
-            confidence = technology['confidence']
-
-            category_dict = technology['categories'][0]
-            category_id = category_dict['id']
-            category_name = category_dict['name']
-            category_slug = category_dict['slug']
-            category = {
-                'id': category_id,
-                'name': category_name,
-                'slug': category_slug
-            }
-
-            result = {
-                'name': name,
-                'slug': slug,
-                'version': version,
-                'confidence': confidence,
-                'category': category,
-            }
-            processed_results.append(result)
-        return processed_results
-
     def scan(self):
-        print(f'[*] Running zap container.')
-        container = self.client.containers.run(self.zap_image_name, self.target, auto_remove=True)
-        raw_results = json.loads(container.decode())
-        self.results[self.target] = self.get_processed_results(raw_results)
+        """
+        Run zap scanner on target
+        """
+        if not self.client.containers.list(filters={'name': self.zap_container_name}):
+            print(f'[*] Running zap container.')
+            command = 'zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true'
+            self.client.containers.run(
+                self.zap_image_name,
+                command,
+                name=self.zap_container_name,
+                ports={'8080/tcp': '8080'},
+                auto_remove=True,
+                detach=True
+            )
+            time.sleep(10)
+            print(f'[+] Container is up now.')
+
+
+        print(f'[+] Scan started.')
+        results_str = zap_scan.run(self.target)
+        self.results[self.target] = json.loads(results_str)
         self.create_output()
 
 
 def run():
-    """Run entrypoint."""
+    """
+    Run entrypoint.
+    """
 
     parser = argparse.ArgumentParser(description="ZAP")
     parser.add_argument(
@@ -91,7 +96,7 @@ def run():
     args = parser.parse_args()
     zap = ZAP(**vars(args))
     zap.scan()
-    print('[+] Done.')
+    print("[+] Done.")
 
 
 if __name__ == '__main__':
